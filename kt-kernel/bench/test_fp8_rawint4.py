@@ -10,11 +10,14 @@ import time
 import torch
 import numpy as np
 
+from fp8_fixture import quantize_fp8_blockwise
+
 # Add build directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 
 try:
     import kt_kernel_ext
+
     print("Successfully imported kt_kernel_ext")
 except ImportError as e:
     print(f"Failed to import kt_kernel_ext: {e}")
@@ -23,9 +26,9 @@ except ImportError as e:
 
 def test_fp8_moe():
     """Test FP8 MoE kernel with weight pre-decoding."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing FP8 MoE Kernel (AVX2FP8_MOE)")
-    print("="*60)
+    print("=" * 60)
 
     # Test parameters
     expert_num = 8
@@ -53,34 +56,7 @@ def test_fp8_moe():
     up_proj = np.random.randn(expert_num, intermediate_size, hidden_size).astype(np.float32)
     down_proj = np.random.randn(expert_num, hidden_size, intermediate_size).astype(np.float32)
 
-    # Quantize to FP8 E4M3
-    def quantize_fp8_blockwise(weight, group_size=128):
-        """Quantize FP32 weight to FP8 E4M3 with block-wise scaling."""
-        n, k = weight.shape
-        n_blocks_n = (n + group_size - 1) // group_size
-        n_blocks_k = (k + group_size - 1) // group_size
-
-        quantized = np.zeros((n, k), dtype=np.uint8)
-        scales = np.zeros((n_blocks_n, n_blocks_k), dtype=np.float32)
-
-        for i in range(n_blocks_n):
-            for j in range(n_blocks_k):
-                row_start = i * group_size
-                row_end = min(row_start + group_size, n)
-                col_start = j * group_size
-                col_end = min(col_start + group_size, k)
-
-                block = weight[row_start:row_end, col_start:col_end]
-                max_val = np.max(np.abs(block))
-                scale = max_val / 448.0 if max_val > 0 else 1.0
-                scales[i, j] = scale
-
-                # FP8 E4M3 range: [-448, 448]
-                q_block = np.round(block / scale).clip(-448, 448)
-                quantized[row_start:row_end, col_start:col_end] = q_block.astype(np.uint8)
-
-        return quantized, scales
-
+    # Quantize to FP8 E4M3FN bit patterns, carried in uint8 arrays.
     gate_quant, gate_scales = quantize_fp8_blockwise(gate_proj.reshape(-1, hidden_size))
     up_quant, up_scales = quantize_fp8_blockwise(up_proj.reshape(-1, hidden_size))
     down_quant, down_scales = quantize_fp8_blockwise(down_proj.reshape(-1, intermediate_size))
@@ -139,30 +115,34 @@ def test_fp8_moe():
 
     # Warmup
     for _ in range(5):
-        cpuinfer.submit(moe.forward_task(
-            qlen_tensor.data_ptr(),
-            num_experts_per_tok,
-            expert_ids.data_ptr(),
-            weights.data_ptr(),
-            input_tensor.data_ptr(),
-            output_tensor.data_ptr(),
-            False,
-        ))
+        cpuinfer.submit(
+            moe.forward_task(
+                qlen_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_tensor.data_ptr(),
+                output_tensor.data_ptr(),
+                False,
+            )
+        )
         cpuinfer.sync()
 
     # Benchmark
     iterations = 50
     start = time.perf_counter()
     for _ in range(iterations):
-        cpuinfer.submit(moe.forward_task(
-            qlen_tensor.data_ptr(),
-            num_experts_per_tok,
-            expert_ids.data_ptr(),
-            weights.data_ptr(),
-            input_tensor.data_ptr(),
-            output_tensor.data_ptr(),
-            False,
-        ))
+        cpuinfer.submit(
+            moe.forward_task(
+                qlen_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_tensor.data_ptr(),
+                output_tensor.data_ptr(),
+                False,
+            )
+        )
         cpuinfer.sync()
     end = time.perf_counter()
 
@@ -175,9 +155,9 @@ def test_fp8_moe():
 
 def test_rawint4_moe():
     """Test RAWINT4 MoE kernel with weight pre-decoding."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing RAWINT4 MoE Kernel (AVX2RawInt4_MOE)")
-    print("="*60)
+    print("=" * 60)
 
     # Test parameters
     expert_num = 8
@@ -228,7 +208,7 @@ def test_rawint4_moe():
         # q_blocks shape: (n, num_groups, group_size)
         # We want to pack pairs: [0,1] -> byte 0, [2,3] -> byte 1, etc.
         even_vals = (q_blocks[:, :, 0::2] + 8) & 0x0F  # shape: (n, num_groups, group_size//2)
-        odd_vals = (q_blocks[:, :, 1::2] + 8) & 0x0F   # shape: (n, num_groups, group_size//2)
+        odd_vals = (q_blocks[:, :, 1::2] + 8) & 0x0F  # shape: (n, num_groups, group_size//2)
         packed = even_vals | (odd_vals << 4)  # shape: (n, num_groups, group_size//2)
 
         # Reshape to (n, k//2)
@@ -291,30 +271,34 @@ def test_rawint4_moe():
 
     # Warmup
     for _ in range(5):
-        cpuinfer.submit(moe.forward_task(
-            qlen_tensor.data_ptr(),
-            num_experts_per_tok,
-            expert_ids.data_ptr(),
-            weights.data_ptr(),
-            input_tensor.data_ptr(),
-            output_tensor.data_ptr(),
-            False,
-        ))
+        cpuinfer.submit(
+            moe.forward_task(
+                qlen_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_tensor.data_ptr(),
+                output_tensor.data_ptr(),
+                False,
+            )
+        )
         cpuinfer.sync()
 
     # Benchmark
     iterations = 50
     start = time.perf_counter()
     for _ in range(iterations):
-        cpuinfer.submit(moe.forward_task(
-            qlen_tensor.data_ptr(),
-            num_experts_per_tok,
-            expert_ids.data_ptr(),
-            weights.data_ptr(),
-            input_tensor.data_ptr(),
-            output_tensor.data_ptr(),
-            False,
-        ))
+        cpuinfer.submit(
+            moe.forward_task(
+                qlen_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_tensor.data_ptr(),
+                output_tensor.data_ptr(),
+                False,
+            )
+        )
         cpuinfer.sync()
     end = time.perf_counter()
 
@@ -327,9 +311,9 @@ def test_rawint4_moe():
 
 def test_decode_performance():
     """Test decode performance (m=1) where pre-decoding should still help for first token."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing Decode Performance (m=1)")
-    print("="*60)
+    print("=" * 60)
 
     expert_num = 8
     hidden_size = 2048
@@ -359,9 +343,15 @@ def test_decode_performance():
             gate_proj = np.random.randint(0, 256, (expert_num, intermediate_size, hidden_size), dtype=np.uint8)
             up_proj = np.random.randint(0, 256, (expert_num, intermediate_size, hidden_size), dtype=np.uint8)
             down_proj = np.random.randint(0, 256, (expert_num, hidden_size, intermediate_size), dtype=np.uint8)
-            gate_scales = np.random.randn(expert_num, (intermediate_size // 128) * (hidden_size // 128)).astype(np.float32)
-            up_scales = np.random.randn(expert_num, (intermediate_size // 128) * (hidden_size // 128)).astype(np.float32)
-            down_scales = np.random.randn(expert_num, (hidden_size // 128) * (intermediate_size // 128)).astype(np.float32)
+            gate_scales = np.random.randn(expert_num, (intermediate_size // 128) * (hidden_size // 128)).astype(
+                np.float32
+            )
+            up_scales = np.random.randn(expert_num, (intermediate_size // 128) * (hidden_size // 128)).astype(
+                np.float32
+            )
+            down_scales = np.random.randn(expert_num, (hidden_size // 128) * (intermediate_size // 128)).astype(
+                np.float32
+            )
             gate_scale_ptr = gate_scales.ctypes.data
             up_scale_ptr = up_scales.ctypes.data
             down_scale_ptr = down_scales.ctypes.data
@@ -413,30 +403,34 @@ def test_decode_performance():
 
         # Warmup
         for _ in range(10):
-            cpuinfer.submit(moe.forward_task(
-                qlen_tensor.data_ptr(),
-                num_experts_per_tok,
-                expert_ids.data_ptr(),
-                weights.data_ptr(),
-                input_tensor.data_ptr(),
-                output_tensor.data_ptr(),
-                False,
-            ))
+            cpuinfer.submit(
+                moe.forward_task(
+                    qlen_tensor.data_ptr(),
+                    num_experts_per_tok,
+                    expert_ids.data_ptr(),
+                    weights.data_ptr(),
+                    input_tensor.data_ptr(),
+                    output_tensor.data_ptr(),
+                    False,
+                )
+            )
             cpuinfer.sync()
 
         # Benchmark
         iterations = 500
         start = time.perf_counter()
         for _ in range(iterations):
-            cpuinfer.submit(moe.forward_task(
-                qlen_tensor.data_ptr(),
-                num_experts_per_tok,
-                expert_ids.data_ptr(),
-                weights.data_ptr(),
-                input_tensor.data_ptr(),
-                output_tensor.data_ptr(),
-                False,
-            ))
+            cpuinfer.submit(
+                moe.forward_task(
+                    qlen_tensor.data_ptr(),
+                    num_experts_per_tok,
+                    expert_ids.data_ptr(),
+                    weights.data_ptr(),
+                    input_tensor.data_ptr(),
+                    output_tensor.data_ptr(),
+                    False,
+                )
+            )
             cpuinfer.sync()
         end = time.perf_counter()
 
@@ -446,7 +440,7 @@ def test_decode_performance():
 
 if __name__ == "__main__":
     print("Testing AVX2 FP8 and RAWINT4 MoE Kernels with Weight Pre-Decoding")
-    print("="*70)
+    print("=" * 70)
 
     try:
         # Test prefill performance
@@ -456,9 +450,9 @@ if __name__ == "__main__":
         # Test decode performance
         test_decode_performance()
 
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("SUMMARY")
-        print("="*70)
+        print("=" * 70)
         print(f"FP8 Prefill (1024 tokens): {fp8_time:.2f} ms/iter")
         print(f"RAWINT4 Prefill (1024 tokens): {rawint4_time:.2f} ms/iter")
         print("\nWeight pre-decoding should show improvement for both prefill and decode")
@@ -467,5 +461,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nError during testing: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
